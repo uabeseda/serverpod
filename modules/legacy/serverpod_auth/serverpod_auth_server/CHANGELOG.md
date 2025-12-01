@@ -27,6 +27,7 @@ There is also one major breaking change regarding the storage of Argon2 hashes i
 ### Additional changes
 
 #### New features
+- feat: Adds multi-client ID support for Google authentication. The server now accepts ID tokens from iOS, macOS, Android, and Web clients by configuring `additional_client_ids` in `google_client_secret.json` or the `googleClientSecret` password. This is fully backward compatible with existing configurations.
 - feat: Adds support for RPC middlewares. ([@gitrema](https://github.com/gitrema))
 - feat: Adds `maxConnectionCount` config option for database pool.
 - feat: The `Request.remoteInfo` now falls back to `connectionInfo.remote.address` instead of `'unknown'` when the information is missing in the headers.

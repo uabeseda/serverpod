@@ -170,8 +170,13 @@ class GoogleEndpoint extends Endpoint {
         );
       }
 
-      if (data['aud'] != clientId) {
-        session.log('Client ID doesn\'t match', level: LogLevel.debug);
+      String audience = data['aud'];
+      if (!clientSecret.isValidClientId(audience)) {
+        session.log(
+          'Client ID doesn\'t match. Received: $audience, '
+          'Expected one of: ${clientSecret.allClientIds.join(", ")}',
+          level: LogLevel.debug,
+        );
         return AuthenticationResponse(
           success: false,
           failReason: AuthenticationFailReason.invalidCredentials,
