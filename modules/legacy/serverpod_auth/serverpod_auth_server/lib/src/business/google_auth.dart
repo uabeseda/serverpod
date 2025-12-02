@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:googleapis_auth/auth_io.dart';
+
 // ignore: implementation_imports
 import 'package:googleapis_auth/src/auth_http_utils.dart';
 import 'package:http/http.dart' as http;
@@ -70,6 +71,26 @@ class GoogleAuth {
             .cast<String>()
             .where((id) => id.isNotEmpty)
             .toList();
+      }
+
+      // Log configuration loading results
+      if (additionalClientIds.isEmpty && webAdditionalClientIds == null) {
+        stderr.writeln(
+          'serverpod_auth_server: No additional_client_ids configured. '
+          'Only primary client ID will be accepted.',
+        );
+      } else if (additionalClientIds.isEmpty &&
+          webAdditionalClientIds != null) {
+        stderr.writeln(
+          'serverpod_auth_server: additional_client_ids configured but all entries are empty. '
+          'No additional client IDs will be used.',
+        );
+      } else {
+        stderr.writeln(
+          'serverpod_auth_server: Google auth config loaded successfully. '
+          'Primary client ID: $webClientId, '
+          'Additional client IDs (${additionalClientIds.length}): ${additionalClientIds.join(", ")}',
+        );
       }
 
       return GoogleClientSecret._(
