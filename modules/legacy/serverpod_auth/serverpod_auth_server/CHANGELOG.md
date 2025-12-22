@@ -17,6 +17,11 @@ Serverpod 3.1 focuses on improving the developer experience with new tooling, en
 
 ### Web server enhancements
 - feat: Add HTTP methods support to `WidgetRoute`.
+#### New features
+- feat: Adds multi-client ID support for Google authentication. The server now accepts ID tokens from iOS, macOS, Android, and Web clients by configuring `additional_client_ids` in `google_client_secret.json` or the `googleClientSecret` password. This is fully backward compatible with existing configurations.
+- feat: Adds support for RPC middlewares. ([@gitrema](https://github.com/gitrema))
+- feat: Adds `maxConnectionCount` config option for database pool.
+- feat: The `Request.remoteInfo` now falls back to `connectionInfo.remote.address` instead of `'unknown'` when the information is missing in the headers.
 
 ### Model improvements
 - feat: Allow setting column name explicitly on models ([@jwelmac](https://github.com/jwelmac)).

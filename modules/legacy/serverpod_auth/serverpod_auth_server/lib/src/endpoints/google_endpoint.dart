@@ -6,6 +6,7 @@ import 'dart:convert';
 
 import 'package:googleapis/people/v1.dart';
 import 'package:googleapis_auth/auth_io.dart';
+
 // ignore: implementation_imports
 import 'package:googleapis_auth/src/auth_http_utils.dart';
 import 'package:http/http.dart' as http;
@@ -161,6 +162,15 @@ class GoogleEndpoint extends Endpoint {
           failReason: AuthenticationFailReason.invalidCredentials,
         );
       }
+
+      // Log token response details for debugging
+      session.log(
+        'Google tokeninfo response: aud=${data['aud']}, iss=${data['iss']}, '
+        'email=${data['email'] != null ? 'present' : 'missing'}, '
+        'name=${data['name'] != null ? 'present' : 'missing'}',
+        level: LogLevel.debug,
+      );
+
       if (!(data['iss'] == 'accounts.google.com' ||
           data['iss'] == 'https://accounts.google.com')) {
         session.log('Invalid token received', level: LogLevel.debug);
@@ -170,18 +180,44 @@ class GoogleEndpoint extends Endpoint {
         );
       }
 
-      if (data['aud'] != clientId) {
-        session.log('Client ID doesn\'t match', level: LogLevel.debug);
+      String audience = data['aud'];
+
+      // Log validation attempt for debugging
+      session.log(
+        'Validating audience. Received: $audience, '
+        'Expected one of: ${clientSecret.allClientIds.join(", ")}',
+        level: LogLevel.debug,
+      );
+
+      if (!clientSecret.isValidClientId(audience)) {
+        session.log(
+          'Client ID doesn\'t match. Received: $audience, '
+          'Expected one of: ${clientSecret.allClientIds.join(", ")}',
+          level: LogLevel.debug,
+        );
         return AuthenticationResponse(
           success: false,
           failReason: AuthenticationFailReason.invalidCredentials,
         );
       }
 
+      // Log successful validation
+      session.log(
+        'Audience validation successful. $audience matches configured client ID.',
+        level: LogLevel.debug,
+      );
+
       String? email = data['email'];
       String? fullName = data['name'];
       String? image = data['picture'];
       String? name = data['given_name'];
+
+      // Log extracted user data for debugging
+      session.log(
+        'Extracted user data: email=$email, name=$name, '
+        'fullName=$fullName, image=${image != null ? 'present' : 'missing'}',
+        level: LogLevel.debug,
+      );
 
       if (email == null || fullName == null || image == null || name == null) {
         session.log(
