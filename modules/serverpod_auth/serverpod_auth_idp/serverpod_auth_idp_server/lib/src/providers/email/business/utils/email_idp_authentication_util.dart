@@ -1,0 +1,114 @@
+import 'package:serverpod/serverpod.dart';
+
+import '../../../../../core.dart';
+import '../../util/email_string_extension.dart';
+import '../email_idp_config.dart';
+import '../email_idp_server_exceptions.dart';
+
+/// {@template email_idp_authentication_util}
+/// Authentication utilities for the email identity provider.
+///
+/// The main entry point is the [authenticate] method, which can be used to authenticate a user.
+///
+/// This class also contains utility functions for administration tasks, such as deleting failed login attempts.
+/// {@endtemplate}
+class EmailIdpAuthenticationUtil {
+  final Argon2HashUtil _hashUtil;
+  final DatabaseRateLimitedRequestAttemptUtil<String> _rateLimitUtil;
+  final int _maxAttempts;
+
+  /// Creates a new instance of [EmailIdpAuthenticationUtil].
+  EmailIdpAuthenticationUtil({
+    required final Argon2HashUtil hashUtil,
+    required final RateLimit failedLoginRateLimit,
+  }) : _hashUtil = hashUtil,
+       _rateLimitUtil = DatabaseRateLimitedRequestAttemptUtil(
+         RateLimitedRequestAttemptConfig(
+           domain: 'email',
+           source: 'failed_login',
+           maxAttempts: failedLoginRateLimit.maxAttempts,
+           timeframe: failedLoginRateLimit.timeframe,
+         ),
+       ),
+       _maxAttempts = failedLoginRateLimit.maxAttempts;
+
+  /// Returns the [AuthUser]'s ID upon successful email/password verification.
+  ///
+  /// Can throw the following [EmailLoginServerException] subclasses:
+  /// - [EmailAccountNotFoundException] if the email address is not registered
+  ///   in the database.
+  /// - [EmailAuthenticationInvalidCredentialsException] if the password is not
+  ///   valid for an existing account.
+  /// - [EmailAuthenticationTooManyAttemptsException] if the user has made
+  ///   too many failed attempts.
+  ///
+  /// In case of invalid credentials, the failed attempt will be logged to
+  /// the database outside of the [transaction] and can not be rolled back.
+  Future<UuidValue> authenticate(
+    final Session session, {
+    required String email,
+    required final String password,
+    required final Transaction? transaction,
+  }) async {
+    email = email.normalizedEmail;
+
+    final attemptCount = await _rateLimitUtil.countAttempts(
+      session,
+      nonce: email,
+      transaction: transaction,
+    );
+    if (attemptCount >= _maxAttempts) {
+      throw EmailAuthenticationTooManyAttemptsException();
+    }
+
+    final account = await EmailAccount.db.findFirstRow(
+      session,
+      where: (final t) => t.email.equals(email),
+      transaction: transaction,
+    );
+
+    if (account == null) {
+      await _rateLimitUtil.recordAttempt(
+        session,
+        nonce: email,
+      );
+      throw EmailAccountNotFoundException();
+    }
+
+    if (!await _hashUtil.validateHashFromString(
+      secret: password,
+      hashString: account.passwordHash,
+    )) {
+      await _rateLimitUtil.recordAttempt(
+        session,
+        nonce: email,
+      );
+      throw EmailAuthenticationInvalidCredentialsException();
+    }
+
+    return account.authUserId;
+  }
+
+  /// {@template email_idp_authentication_utils.delete_failed_login_attempts}
+  /// Cleans up the log of failed login attempts older than [olderThan].
+  ///
+  /// If [olderThan] is `null`, this will remove all attempts outside the time
+  /// window that is checked upon login, as configured in
+  /// [EmailIdpConfig.failedLoginRateLimit].
+  ///
+  /// If [email] is provided, only attempts for the given email will be deleted.
+  /// {@endtemplate}
+  Future<void> deleteFailedLoginAttempts(
+    final Session session, {
+    final Duration? olderThan,
+    final String? email,
+    required final Transaction transaction,
+  }) async {
+    await _rateLimitUtil.deleteAttempts(
+      session,
+      olderThan: olderThan,
+      nonce: email,
+      transaction: transaction,
+    );
+  }
+}
