@@ -1,17 +1,24 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:cli_tools/cli_tools.dart';
+import 'package:cli_tools/execute.dart';
 import 'package:path/path.dart' as p;
+import 'package:pub_semver/pub_semver.dart';
 import 'package:serverpod_cli/src/create/database_setup.dart';
 import 'package:serverpod_cli/src/create/generate_files.dart';
 import 'package:serverpod_cli/src/downloads/resource_manager.dart';
 import 'package:serverpod_cli/src/generated/version.dart';
+import 'package:serverpod_cli/src/scripts/script.dart';
+import 'package:serverpod_cli/src/scripts/scripts.dart';
 import 'package:serverpod_cli/src/shared/environment.dart';
 import 'package:serverpod_cli/src/util/command_line_tools.dart';
 import 'package:serverpod_cli/src/util/directory.dart';
 import 'package:serverpod_cli/src/util/entitlements_modifier.dart';
 import 'package:serverpod_cli/src/util/project_name.dart';
+import 'package:serverpod_cli/src/util/pubspec_helpers.dart';
 import 'package:serverpod_cli/src/util/serverpod_cli_logger.dart';
 import 'package:serverpod_cli/src/util/string_validators.dart';
 import 'package:serverpod_shared/serverpod_shared.dart';
@@ -118,9 +125,16 @@ Future<bool> performCreate(
     success &= await log.progress(
       'Writing additional project files.',
       () async {
-        _copyServerUpgrade(
+        await _copyServerUpgrade(
           serverpodDirs,
           name: name,
+          isUpgrade: false,
+          customServerpodPath: productionMode ? null : serverpodHome,
+        );
+        await _copyFlutterUpgrade(
+          serverpodDirs,
+          name: name,
+          customServerpodPath: productionMode ? null : serverpodHome,
         );
         return true;
       },
@@ -166,6 +180,48 @@ Future<bool> performCreate(
         interactive: interactive,
       );
     });
+  }
+
+  if (template == ServerpodTemplateType.server) {
+    await log.progress(
+      'Building Flutter web app.',
+      () async {
+        final Script? script;
+        try {
+          script = _locateFlutterBuildScript(serverpodDirs.serverDir);
+        } catch (e) {
+          log.error('Error when locating flutter build script: $e');
+          return false;
+        }
+
+        if (script == null) {
+          log.error('Failed to locate flutter build script, skipping build.');
+          return false;
+        }
+
+        final stdoutController = StreamController<List<int>>();
+        stdoutController.stream
+            .transform(const Utf8Decoder(allowMalformed: true))
+            .transform(const LineSplitter())
+            .listen((data) => log.debug(data));
+        final toDebugLog = IOSink(stdoutController);
+        final stderrController = StreamController<List<int>>();
+        stderrController.stream
+            .transform(const Utf8Decoder(allowMalformed: true))
+            .transform(const LineSplitter())
+            .listen((data) => log.error(data));
+        final toErrorLog = IOSink(stderrController);
+
+        final exitCode = await execute(
+          script.command,
+          workingDirectory: serverpodDirs.serverDir,
+          stdout: toDebugLog,
+          stderr: toErrorLog,
+        );
+
+        return exitCode == 0;
+      },
+    );
   }
 
   if (success || force) {
@@ -221,10 +277,11 @@ Future<bool> _performUpgrade(
   success &= await log.progress(
     'Upgrading project.',
     () async {
-      _copyServerUpgrade(
+      await _copyServerUpgrade(
         serverpodDir,
         name: name,
-        skipMain: true,
+        isUpgrade: true,
+        customServerpodPath: productionMode ? null : serverpodHome,
       );
       return true;
     },
@@ -372,18 +429,96 @@ void _createDirectory(Directory dir) {
   dir.createSync();
 }
 
-void _copyServerUpgrade(
+Future<void> _copyFlutterUpgrade(
   ServerpodDirectories serverpodDirs, {
   required String name,
-  bool skipMain = false,
-}) {
+  String? customServerpodPath,
+}) async {
+  log.debug('Copying Flutter upgrade files.', newParagraph: true);
+  var copier = Copier(
+    srcDir: Directory(
+      p.join(
+        resourceManager.templateDirectory.path,
+        'projectname_flutter_upgrade',
+      ),
+    ),
+    dstDir: serverpodDirs.flutterDir,
+    replacements: [
+      Replacement(
+        slotName: 'projectname',
+        replacement: name,
+      ),
+    ],
+    fileNameReplacements: const [],
+    ignoreFileNames: const [],
+  );
+  copier.copyFiles();
+
+  log.debug('Adding auth dependencies to Flutter pubspec', newParagraph: true);
+  _addDependenciesToPubspec(
+    pubspecFile: File(p.join(serverpodDirs.flutterDir.path, 'pubspec.yaml')),
+    additions: [
+      (
+        name: 'serverpod_auth_idp_flutter',
+        source: DependencySource.version(
+          VersionConstraint.parse(templateVersion),
+        ),
+        type: DependencyType.normal,
+      ),
+      (
+        name: 'flutter_secure_storage',
+        source: DependencySource.version(
+          VersionConstraint.parse('^10.0.0'),
+        ),
+        type: DependencyType.override,
+      ),
+      if (customServerpodPath != null) ...[
+        (
+          name: 'serverpod_auth_idp_flutter',
+          source: DependencySourcePath(
+            '$customServerpodPath/modules/serverpod_auth/serverpod_auth_idp/serverpod_auth_idp_flutter',
+          ),
+          type: DependencyType.override,
+        ),
+        (
+          name: 'serverpod_auth_core_client',
+          source: DependencySourcePath(
+            '$customServerpodPath/modules/serverpod_auth/serverpod_auth_core/serverpod_auth_core_client',
+          ),
+          type: DependencyType.override,
+        ),
+        (
+          name: 'serverpod_auth_core_flutter',
+          source: DependencySourcePath(
+            '$customServerpodPath/modules/serverpod_auth/serverpod_auth_core/serverpod_auth_core_flutter',
+          ),
+          type: DependencyType.override,
+        ),
+        (
+          name: 'serverpod_auth_idp_client',
+          source: DependencySourcePath(
+            '$customServerpodPath/modules/serverpod_auth/serverpod_auth_idp/serverpod_auth_idp_client',
+          ),
+          type: DependencyType.override,
+        ),
+      ],
+    ],
+  );
+}
+
+Future<void> _copyServerUpgrade(
+  ServerpodDirectories serverpodDirs, {
+  required String name,
+  required bool isUpgrade,
+  String? customServerpodPath,
+}) async {
   var awsName = name.replaceAll('_', '-');
   var randomAwsId = math.Random.secure().nextInt(10000000).toString();
 
   var dbTestPassword = generateRandomString();
   var redisTestPassword = generateRandomString();
 
-  log.debug('Copying upgrade files.', newParagraph: true);
+  log.debug('Copying server upgrade files.', newParagraph: true);
   var copier = Copier(
     srcDir: Directory(
       p.join(
@@ -445,9 +580,79 @@ void _copyServerUpgrade(
         slotName: 'REDIS_TEST_PASSWORD',
         replacement: redisTestPassword,
       ),
+      Replacement(
+        slotName: 'SERVER_SIDE_SESSION_KEY_HASH_PEPPER_DEVELOPMENT',
+        replacement: generateRandomString(),
+      ),
+      Replacement(
+        slotName: 'SERVER_SIDE_SESSION_KEY_HASH_PEPPER_TEST',
+        replacement: generateRandomString(),
+      ),
+      Replacement(
+        slotName: 'SERVER_SIDE_SESSION_KEY_HASH_PEPPER_STAGING',
+        replacement: generateRandomString(),
+      ),
+      Replacement(
+        slotName: 'SERVER_SIDE_SESSION_KEY_HASH_PEPPER_PRODUCTION',
+        replacement: generateRandomString(),
+      ),
+      Replacement(
+        slotName: 'EMAIL_SECRET_HASH_PEPPER_DEVELOPMENT',
+        replacement: generateRandomString(),
+      ),
+      Replacement(
+        slotName: 'JWT_HMAC_SHA512_PRIVATE_KEY_DEVELOPMENT',
+        replacement: generateRandomString(),
+      ),
+      Replacement(
+        slotName: 'JWT_REFRESH_TOKEN_HASH_PEPPER_DEVELOPMENT',
+        replacement: generateRandomString(),
+      ),
+      Replacement(
+        slotName: 'EMAIL_SECRET_HASH_PEPPER_TEST',
+        replacement: generateRandomString(),
+      ),
+      Replacement(
+        slotName: 'JWT_HMAC_SHA512_PRIVATE_KEY_TEST',
+        replacement: generateRandomString(),
+      ),
+      Replacement(
+        slotName: 'JWT_REFRESH_TOKEN_HASH_PEPPER_TEST',
+        replacement: generateRandomString(),
+      ),
+      Replacement(
+        slotName: 'EMAIL_SECRET_HASH_PEPPER_STAGING',
+        replacement: generateRandomString(),
+      ),
+      Replacement(
+        slotName: 'JWT_HMAC_SHA512_PRIVATE_KEY_STAGING',
+        replacement: generateRandomString(),
+      ),
+      Replacement(
+        slotName: 'JWT_REFRESH_TOKEN_HASH_PEPPER_STAGING',
+        replacement: generateRandomString(),
+      ),
+      Replacement(
+        slotName: 'EMAIL_SECRET_HASH_PEPPER_PRODUCTION',
+        replacement: generateRandomString(),
+      ),
+      Replacement(
+        slotName: 'JWT_HMAC_SHA512_PRIVATE_KEY_PRODUCTION',
+        replacement: generateRandomString(),
+      ),
+      Replacement(
+        slotName: 'JWT_REFRESH_TOKEN_HASH_PEPPER_PRODUCTION',
+        replacement: generateRandomString(),
+      ),
     ],
     fileNameReplacements: const [],
-    ignoreFileNames: [if (skipMain) 'server.dart'],
+    ignoreFileNames: [
+      if (isUpgrade) ...[
+        'server.dart',
+        'email_idp_endpoint.dart',
+        'jwt_refresh_endpoint.dart',
+      ],
+    ],
   );
   copier.copyFiles();
 
@@ -484,6 +689,83 @@ void _copyServerUpgrade(
     fileNameReplacements: [],
   );
   copier.copyFiles();
+
+  if (!isUpgrade) {
+    log.debug(
+      'Adding auth dependencies to server and client pubspecs',
+      newParagraph: true,
+    );
+    _addDependenciesToPubspec(
+      pubspecFile: File(p.join(serverpodDirs.serverDir.path, 'pubspec.yaml')),
+      additions: [
+        (
+          name: 'serverpod_auth_idp_server',
+          source: DependencySource.version(
+            VersionConstraint.parse(templateVersion),
+          ),
+          type: DependencyType.normal,
+        ),
+        if (customServerpodPath != null) ...[
+          (
+            name: 'serverpod_auth_idp_server',
+            source: DependencySourcePath(
+              '$customServerpodPath/modules/serverpod_auth/serverpod_auth_idp/serverpod_auth_idp_server',
+            ),
+            type: DependencyType.override,
+          ),
+          (
+            name: 'serverpod_auth_core_server',
+            source: DependencySourcePath(
+              '$customServerpodPath/modules/serverpod_auth/serverpod_auth_core/serverpod_auth_core_server',
+            ),
+            type: DependencyType.override,
+          ),
+        ],
+      ],
+    );
+    _addDependenciesToPubspec(
+      pubspecFile: File(p.join(serverpodDirs.clientDir.path, 'pubspec.yaml')),
+      additions: [
+        (
+          name: 'serverpod_auth_idp_client',
+          source: DependencySource.version(
+            VersionConstraint.parse(templateVersion),
+          ),
+          type: DependencyType.normal,
+        ),
+        if (customServerpodPath != null) ...[
+          (
+            name: 'serverpod_auth_idp_client',
+            source: DependencySourcePath(
+              '$customServerpodPath/modules/serverpod_auth/serverpod_auth_idp/serverpod_auth_idp_client',
+            ),
+            type: DependencyType.override,
+          ),
+          (
+            name: 'serverpod_auth_core_client',
+            source: DependencySourcePath(
+              '$customServerpodPath/modules/serverpod_auth/serverpod_auth_core/serverpod_auth_core_client',
+            ),
+            type: DependencyType.override,
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+void _addDependenciesToPubspec({
+  required File pubspecFile,
+  required List<DependencyUpdate> additions,
+}) {
+  if (!pubspecFile.existsSync()) {
+    log.debug('Pubspec file not found: ${pubspecFile.path}');
+    return;
+  }
+
+  var contents = pubspecFile.readAsStringSync();
+  contents = addDependencyToPubspec(contents, additions: additions);
+  pubspecFile.writeAsStringSync(contents);
 }
 
 void _copyServerTemplates(
@@ -518,7 +800,7 @@ void _copyServerTemplates(
         replacement: '.gitignore',
       ),
     ],
-    ignoreFileNames: ['pubspec.lock'],
+    ignoreFileNames: ['pubspec.lock', 'pubspec_overrides.yaml'],
   );
   copier.copyFiles();
 
@@ -582,6 +864,7 @@ void _copyServerTemplates(
     ],
     ignoreFileNames: [
       'pubspec.lock',
+      'pubspec_overrides.yaml',
       'ios',
       'android',
       'web',
@@ -624,7 +907,7 @@ void _copyModuleTemplates(
         replacement: '.gitignore',
       ),
     ],
-    ignoreFileNames: ['pubspec.lock'],
+    ignoreFileNames: ['pubspec.lock', 'pubspec_overrides.yaml'],
   );
   copier.copyFiles();
 
@@ -655,7 +938,13 @@ void _copyModuleTemplates(
         replacement: '.gitignore',
       ),
     ],
-    ignoreFileNames: ['pubspec.lock'],
+    ignoreFileNames: ['pubspec.lock', 'pubspec_overrides.yaml'],
   );
   copier.copyFiles();
+}
+
+Script? _locateFlutterBuildScript(Directory serverDir) {
+  final pubspecFile = File(p.join(serverDir.path, 'pubspec.yaml'));
+  final scripts = Scripts.fromPubspecFile(pubspecFile);
+  return scripts['flutter_build'];
 }
